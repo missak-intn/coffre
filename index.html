@@ -22,10 +22,17 @@ button.p{background:var(--acc);color:#fff}
 button.d{color:var(--red)}
 button.l{background:none;padding:6px 8px;color:var(--acc)}
 input[type=password],input[type=text]{font:inherit;width:100%;padding:13px;border-radius:10px;border:1px solid #33363c;background:var(--card);color:var(--fg);-webkit-user-select:text;user-select:text}
-#lock{position:fixed;inset:0;background:var(--bg);z-index:50;display:flex;flex-direction:column;justify-content:center;gap:12px;padding:32px;max-width:420px;margin:auto}
+#lock{position:fixed;inset:0;background:var(--bg);z-index:50;display:flex;flex-direction:column;justify-content:center;gap:10px;padding:24px 32px;max-width:420px;margin:auto}
 #lock h1{margin:0 0 4px;font-size:28px}
 #lock p{margin:0;color:var(--mut);font-size:14px}
-#msg{color:var(--red);min-height:20px}
+#msg{color:var(--red);min-height:20px;text-align:center}
+#dots{display:flex;justify-content:center;align-items:center;flex-wrap:wrap;gap:10px;min-height:28px;padding:4px 0}
+#dots:empty::before{content:"Entre ton code";color:var(--mut);font-size:14px}
+#dots i{width:14px;height:14px;border-radius:50%;background:var(--fg)}
+#pad{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;width:100%;max-width:300px;margin:0 auto}
+#pad button{height:60px;font-size:26px;padding:0;border-radius:16px}
+#pad button:active{background:#2a2d33}
+#fidrow{display:flex;justify-content:center;padding:6px 12px 18px}
 header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:6px;padding:calc(env(safe-area-inset-top) + 8px) 12px 8px;background:rgba(17,18,20,.92);backdrop-filter:blur(12px)}
 header h2{flex:1;margin:0;font-size:19px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #app{padding-bottom:calc(env(safe-area-inset-bottom) + 90px);min-height:100%}
@@ -64,10 +71,14 @@ header h2{flex:1;margin:0;font-size:19px;white-space:nowrap;overflow:hidden;text
 <div id="lock" hidden>
   <h1>🔒 Coffre</h1>
   <p id="lockinfo"></p>
-  <input type="password" id="pin" placeholder="Code" autocomplete="off">
-  <input type="password" id="pin2" placeholder="Confirmer le code" autocomplete="off" hidden>
+  <input type="password" id="pin" inputmode="numeric" placeholder="Code" autocomplete="off" hidden>
+  <input type="password" id="pin2" inputmode="numeric" placeholder="Confirmer le code" autocomplete="off" hidden>
+  <div id="dots" hidden></div>
+  <div id="pad" hidden></div>
   <div id="msg"></div>
+  <button class="p" id="fid" hidden>Déverrouiller avec Face ID</button>
   <button class="p" id="go">Déverrouiller</button>
+  <button class="l" id="kbd" hidden>Clavier ABC</button>
   <button class="l" id="restore" hidden>Restaurer une sauvegarde</button>
   <input type="file" id="restoref" accept=".vault,application/json" hidden>
 </div>
@@ -154,24 +165,117 @@ async function loadThumb(id,img){
 function thumbImg(id){const i=document.createElement('img');i.dataset.id=id;i.alt='';io.observe(i);return i;}
 
 /* ---------- Lock / setup ---------- */
-let setupMode=false;
+let setupMode=false, entry='', abc=false, PLEN=0, FID_OK=false, FID_ON=false, faceBusy=false, unlocking=false;
+const fidAvail=(window.PublicKeyCredential&&navigator.credentials&&PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable)
+  ?PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().catch(()=>false):Promise.resolve(false);
+const kvDel=k=>tx('kv','readwrite',s=>s.delete(k));
 async function boot(){
   const salt=await kvGet('salt');
-  setupMode=!salt;
+  setupMode=!salt;entry='';abc=false;
+  PLEN=Number(await kvGet('plen'))||0;
   $('#lock').hidden=false;
-  $('#pin2').hidden=!setupMode;
+  $('#pin').hidden=!setupMode;$('#pin2').hidden=!setupMode;
+  $('#pin').setAttribute('inputmode',setupMode?'numeric':'text');
+  $('#pad').hidden=setupMode;$('#dots').hidden=setupMode;$('#kbd').hidden=setupMode;
+  $('#kbd').textContent='Clavier ABC';
+  $('#fid').hidden=true;
   $('#restore').hidden=!setupMode;
   $('#go').textContent=setupMode?'Créer le coffre':'Déverrouiller';
-  $('#lockinfo').textContent=setupMode?'Choisis un code d’au moins 6 caractères. Il chiffre tes photos : s’il est perdu, elles sont irrécupérables.':'';
+  $('#lockinfo').textContent=setupMode?'Choisis un code d’au moins 6 chiffres (8 ou plus, c’est mieux). Il chiffre tes photos : s’il est perdu, elles sont irrécupérables.':'';
   $('#pin').value='';$('#pin2').value='';$('#msg').textContent='';
+  drawDots();
+  if(setupMode)return;
+  FID_OK=await fidAvail;
+  const f=FID_OK?await kvGet('fid'):null;
+  if(f&&!KEY){$('#fid').hidden=false;faceUnlock(true);}
 }
 const msg=t=>$('#msg').textContent=t;
+
+/* Pavé numérique intégré : s’affiche tout de suite, sans toucher de champ (iOS interdit d’ouvrir le clavier tout seul) */
+const pad=$('#pad');
+['1','2','3','4','5','6','7','8','9','','0','⌫'].forEach(k=>{
+  if(!k){pad.append(document.createElement('span'));return;}
+  const b=document.createElement('button');b.type='button';b.textContent=k;b.dataset.k=k;
+  if(k==='⌫')b.setAttribute('aria-label','Effacer');
+  b.onclick=()=>k==='⌫'?back():press(k);
+  pad.append(b);
+});
+function drawDots(){const d=$('#dots');d.innerHTML='';for(let i=0;i<entry.length;i++)d.append(document.createElement('i'));}
+function press(k){
+  if(unlocking||setupMode||abc||entry.length>=32)return;
+  entry+=k;drawDots();msg('');
+  if(PLEN&&entry.length===PLEN)$('#go').click();   // déverrouillage automatique à la bonne longueur
+}
+function back(){if(unlocking)return;entry=entry.slice(0,-1);drawDots();}
+$('#kbd').onclick=()=>{
+  abc=!abc;entry='';drawDots();$('#pin').value='';msg('');
+  $('#pin').hidden=!abc;$('#pad').hidden=abc;$('#dots').hidden=abc;
+  $('#kbd').textContent=abc?'Clavier numérique':'Clavier ABC';
+  if(abc)$('#pin').focus();
+};
+document.addEventListener('keydown',e=>{
+  if($('#lock').hidden||setupMode||abc||e.metaKey||e.ctrlKey||e.altKey)return;
+  if(/^\d$/.test(e.key))press(e.key);
+  else if(e.key==='Backspace')back();
+  else if(e.key==='Enter')$('#go').click();
+});
+
+/* Face ID (WebAuthn, authentificateur de la plateforme) : sert de verrou, le code reste le secours */
+async function faceUnlock(auto){
+  if(faceBusy||KEY||unlocking)return;
+  faceBusy=true;
+  try{
+    const f=await kvGet('fid');if(!f)return;
+    const cred=await navigator.credentials.get({publicKey:{
+      challenge:crypto.getRandomValues(new Uint8Array(32)),
+      allowCredentials:[{id:f.cid,type:'public-key',transports:['internal']}],
+      userVerification:'required',timeout:60000}});
+    if(KEY)return;
+    const ad=new Uint8Array(cred.response.authenticatorData);
+    if(!(ad[32]&4))throw new Error('verification utilisateur absente');
+    await decBuf(await kvGet('check'),f.key);
+    KEY=f.key;
+    await enter();
+  }catch(e){
+    console.warn('faceid',e&&e.name,e&&e.message);
+    if(!auto)msg('Face ID annulé ou non reconnu. Utilise ton code.');
+  }finally{faceBusy=false;}
+}
+$('#fid').onclick=()=>faceUnlock(false);
+async function enableFaceId(){
+  try{
+    const cred=await navigator.credentials.create({publicKey:{
+      rp:{name:'Coffre'},
+      user:{id:crypto.getRandomValues(new Uint8Array(16)),name:'coffre',displayName:'Coffre'},
+      challenge:crypto.getRandomValues(new Uint8Array(32)),
+      pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],
+      authenticatorSelection:{authenticatorAttachment:'platform',userVerification:'required',residentKey:'discouraged'},
+      attestation:'none',timeout:60000}});
+    await kvSet('fid',{cid:cred.rawId,key:KEY});
+    const f=await kvGet('fid');
+    await decBuf(await kvGet('check'),f.key);   // vérifie que la clé stockée fonctionne bien
+    FID_ON=true;render();toast('Face ID activé');
+  }catch(e){
+    console.warn('faceid-enable',e);
+    await kvDel('fid').catch(()=>{});FID_ON=false;render();
+    toast('Face ID indisponible ici. Le code reste actif.',4000);
+  }
+}
+async function disableFaceId(){await kvDel('fid');FID_ON=false;render();toast('Face ID désactivé');}
+async function enter(){
+  await loadAll();
+  FID_OK=await fidAvail;
+  FID_ON=FID_OK&&!!(await kvGet('fid'));
+  $('#lock').hidden=true;view={t:'home'};sel=null;render();
+  if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();
+}
 $('#go').onclick=async()=>{
-  const pin=$('#pin').value;msg('');
-  const btn=$('#go');btn.disabled=true;
+  if(unlocking)return;
+  const pin=(setupMode||abc)?$('#pin').value:entry;msg('');
+  const btn=$('#go');btn.disabled=true;unlocking=true;
   try{
     if(setupMode){
-      if(pin.length<6)return msg('6 caractères minimum.');
+      if(!/^\d{6,}$/.test(pin))return msg('6 chiffres minimum.');
       if(pin!==$('#pin2').value)return msg('Les codes ne correspondent pas.');
       const salt=crypto.getRandomValues(new Uint8Array(16));
       KEY=await deriveKey(pin,salt);
@@ -179,13 +283,18 @@ $('#go').onclick=async()=>{
       META={albums:[],vids:[],trash:[]};await saveMeta();
     }else{
       const salt=await kvGet('salt');const k=await deriveKey(pin,salt);
-      try{await decBuf(await kvGet('check'),k);}catch(e){await new Promise(r=>setTimeout(r,1000));return msg('Code incorrect.');}
+      try{await decBuf(await kvGet('check'),k);}catch(e){
+        await new Promise(r=>setTimeout(r,1000));
+        entry='';drawDots();$('#pin').value='';
+        return msg('Code incorrect.');
+      }
       KEY=k;
     }
-    await loadAll();
-    $('#lock').hidden=true;view={t:'home'};sel=null;render();
-    if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();
-  }finally{btn.disabled=false;}
+    // longueur du code (si 100 % chiffres) : permet le déverrouillage automatique au dernier chiffre
+    PLEN=/^\d+$/.test(pin)?pin.length:0;await kvSet('plen',PLEN);
+    entry='';drawDots();
+    await enter();
+  }finally{btn.disabled=false;unlocking=false;}
 };
 $('#pin').addEventListener('keydown',e=>{if(e.key==='Enter'&&!setupMode)$('#go').click();});
 async function loadAll(){
@@ -241,6 +350,11 @@ function renderHome(app){
   const tids=trashIds();
   g.append(card('Corbeille',tids.length?cnt(tids.length):'Vide',tids[0],()=>{view={t:'trash'};sel=new Set();render();},'🗑'));
   app.append(g);
+  if(FID_OK){
+    const r=document.createElement('div');r.id='fidrow';
+    r.append(FID_ON?btn('Face ID activé · Désactiver',disableFaceId):btn('Activer Face ID',enableFaceId));
+    app.append(r);
+  }
 }
 function card(name,sub,coverId,fn,emoji){
   const c=document.createElement('div');c.className='card';c.onclick=fn;
@@ -606,6 +720,7 @@ $('#restoref').onchange=async e=>{
   const f=e.target.files[0];e.target.value='';if(!f)return;
   try{
     toast('Restauration…',0);
+    await kvDel('fid').catch(()=>{});
     if(D.decode(await f.slice(0,4).arrayBuffer())==='CFR2'){
       const hl=new DataView(await f.slice(4,8).arrayBuffer()).getUint32(0);
       const h=JSON.parse(D.decode(await f.slice(8,8+hl).arrayBuffer()));
