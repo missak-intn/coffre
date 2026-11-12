@@ -40,8 +40,9 @@ header h2{flex:1;margin:0;font-size:19px;white-space:nowrap;overflow:hidden;text
 .cell img{width:100%;height:100%;object-fit:cover;display:block}
 .cell.s::after{content:"✓";position:absolute;inset:0;background:rgba(76,154,255,.45);display:flex;align-items:flex-end;justify-content:flex-end;padding:6px;font-size:22px;font-weight:700}
 .empty{color:var(--mut);text-align:center;padding:60px 30px;line-height:1.5}
-#bar{position:fixed;left:0;right:0;bottom:0;z-index:6;display:flex;justify-content:center;gap:10px;padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);background:linear-gradient(transparent,var(--bg) 40%)}
-#bar button{box-shadow:0 2px 10px rgba(0,0,0,.4)}
+#bar{position:fixed;left:0;right:0;bottom:0;z-index:6;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);background:linear-gradient(transparent,var(--bg) 40%)}
+#bar button{padding:9px 12px;font-size:15px;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.note{color:var(--mut);font-size:13px;text-align:center;padding:6px 16px 10px}
 #viewer{position:fixed;inset:0;z-index:20;background:#000;display:flex;flex-direction:column}
 #vtop,#vbot{display:flex;align-items:center;justify-content:space-between;padding:calc(env(safe-area-inset-top) + 6px) 12px 6px}
 #vbot{padding:6px 12px calc(env(safe-area-inset-bottom) + 10px)}
@@ -78,7 +79,7 @@ header h2{flex:1;margin:0;font-size:19px;white-space:nowrap;overflow:hidden;text
 <div id="viewer" hidden>
   <div id="vtop"><button class="l" id="vclose">Fermer</button><span id="vcount" style="color:var(--mut)"></span><button class="l" id="valb">Albums</button></div>
   <div id="vwrap"><img id="vimg" alt=""><video id="vvid" controls playsinline loop hidden></video></div>
-  <div id="vbot"><button class="d" id="vdel">Supprimer</button><span><button class="l" id="vprev" style="font-size:26px;padding:0 14px">‹</button><button class="l" id="vnext" style="font-size:26px;padding:0 14px">›</button></span></div>
+  <div id="vbot"><button class="d" id="vdel">Supprimer</button><button class="l" id="vexp">Exporter</button><span><button class="l" id="vprev" style="font-size:26px;padding:0 14px">‹</button><button class="l" id="vnext" style="font-size:26px;padding:0 14px">›</button></span></div>
 </div>
 <div id="sheetbg" hidden><div id="sheet"></div></div>
 
@@ -128,8 +129,15 @@ const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&qu
 const newId=()=>Date.now().toString(36).padStart(9,'0')+Math.random().toString(36).slice(2,7);
 const album=id=>META.albums.find(a=>a.id===id);
 const isVid=id=>(META.vids||[]).includes(id);
+const TRASH_DAYS=30, EXPORT_MAX=250*1024*1024;
+const cnt=n=>n+' élément'+(n>1?'s':'');
+const trashIds=()=>META.trash.slice().sort((a,b)=>b.at-a.at).map(t=>t.id);
+const EXT={'image/jpeg':'jpg','image/png':'png','image/heic':'heic','image/heif':'heif','image/webp':'webp','image/gif':'gif','video/mp4':'mp4','video/quicktime':'mov','video/x-m4v':'m4v'};
+const exportName=(id,type)=>'coffre-'+id+'.'+(EXT[type]||((type||'').startsWith('video/')?'mp4':'jpg'));
+const mb=b=>(b/1048576).toFixed(b<10485760?1:0)+' Mo';
 function curIds(){
   if(view.t==='all')return IDS;
+  if(view.t==='trash')return trashIds();
   const a=album(view.id);if(!a)return [];
   const s=new Set(a.ids);return IDS.filter(i=>s.has(i));
 }
@@ -168,7 +176,7 @@ $('#go').onclick=async()=>{
       const salt=crypto.getRandomValues(new Uint8Array(16));
       KEY=await deriveKey(pin,salt);
       await kvSet('salt',salt);await kvSet('check',await encBuf(E.encode('ok')));
-      META={albums:[],vids:[]};await saveMeta();
+      META={albums:[],vids:[],trash:[]};await saveMeta();
     }else{
       const salt=await kvGet('salt');const k=await deriveKey(pin,salt);
       try{await decBuf(await kvGet('check'),k);}catch(e){await new Promise(r=>setTimeout(r,1000));return msg('Code incorrect.');}
@@ -181,14 +189,20 @@ $('#go').onclick=async()=>{
 };
 $('#pin').addEventListener('keydown',e=>{if(e.key==='Enter'&&!setupMode)$('#go').click();});
 async function loadAll(){
-  IDS=(await keys('thumbs')).sort().reverse();
   const m=await kvGet('meta');
   META=m?JSON.parse(D.decode(await decBuf(m))):{albums:[]};
   if(!META.vids)META.vids=[];
+  if(!META.trash)META.trash=[];
+  IDS=[];
+  const limit=Date.now()-TRASH_DAYS*86400000;
+  const old=META.trash.filter(t=>t.at<limit).map(t=>t.id);
+  if(old.length)await purge(old,true);
+  const tr=new Set(META.trash.map(t=>t.id));
+  IDS=(await keys('thumbs')).sort().reverse().filter(i=>!tr.has(i));
 }
 function lock(){
   if(V)closeViewer();
-  KEY=null;META={albums:[],vids:[]};IDS=[];sel=null;
+  KEY=null;META={albums:[],vids:[],trash:[]};IDS=[];sel=null;
   for(const u of thumbURL.values())URL.revokeObjectURL(u);thumbURL.clear();
   $('#app').innerHTML='';$('#bar').hidden=true;$('#viewer').hidden=true;$('#vimg').removeAttribute('src');$('#sheetbg').hidden=true;
   boot();
@@ -216,39 +230,53 @@ function btn(label,fn,cls='l'){const b=document.createElement('button');b.classN
 function renderHome(app){
   app.append(header('Coffre',null,[btn('Sauvegarde',backupMenu),btn('Verrouiller',lock)]));
   const g=document.createElement('div');g.className='albums';
-  g.append(card('Toutes les photos',IDS.length,IDS[0],()=>{view={t:'all'};sel=null;render();}));
+  g.append(card('Toutes les photos',cnt(IDS.length),IDS[0],()=>{view={t:'all'};sel=null;render();}));
   for(const a of META.albums){
     const ids=IDS.filter(i=>a.ids.includes(i));
-    g.append(card(a.name,ids.length,ids[0],()=>{view={t:'album',id:a.id};sel=null;render();}));
+    g.append(card(a.name,cnt(ids.length),ids[0],()=>{view={t:'album',id:a.id};sel=null;render();}));
   }
   const n=document.createElement('div');n.className='card';n.onclick=newAlbumPrompt;
   n.innerHTML='<div class="cover">＋</div><b>Nouvel album</b>';
   g.append(n);
+  const tids=trashIds();
+  g.append(card('Corbeille',tids.length?cnt(tids.length):'Vide',tids[0],()=>{view={t:'trash'};sel=new Set();render();},'🗑'));
   app.append(g);
 }
-function card(name,count,coverId,fn){
+function card(name,sub,coverId,fn,emoji){
   const c=document.createElement('div');c.className='card';c.onclick=fn;
   const cv=document.createElement('div');cv.className='cover';
-  if(coverId)cv.append(thumbImg(coverId));else cv.textContent='🖼';
+  if(coverId)cv.append(thumbImg(coverId));else cv.textContent=emoji||'🖼';
   const b=document.createElement('b');b.textContent=name;
-  const s=document.createElement('span');s.textContent=count+' photo'+(count>1?'s':'');
+  const s=document.createElement('span');s.textContent=sub;
   c.append(cv,b,s);return c;
 }
 function renderGrid(app){
+  const trash=view.t==='trash';
+  if(trash&&!sel)sel=new Set();
   const ids=curIds();
   const a=view.t==='album'?album(view.id):null;
   if(view.t==='album'&&!a){view={t:'home'};return render();}
-  const title=sel?(sel.size+' sélectionnée'+(sel.size>1?'s':'')):(a?a.name:'Toutes les photos');
+  const title=trash?(sel.size?sel.size+' sélectionné'+(sel.size>1?'s':''):'Corbeille'):sel?(sel.size+' sélectionnée'+(sel.size>1?'s':'')):(a?a.name:'Toutes les photos');
   const right=[];
-  if(sel)right.push(btn('Annuler',()=>{sel=null;render();}));
+  if(trash){
+    if(ids.length){
+      right.push(btn('Tout',()=>{sel=new Set(sel.size===ids.length?[]:ids);render();}));
+      const v=btn('Vider',emptyTrash);v.style.color='var(--red)';right.push(v);
+    }
+  }else if(sel)right.push(btn('Annuler',()=>{sel=null;render();}));
   else{
     if(ids.length)right.push(btn('Sélectionner',()=>{sel=new Set();render();}));
     if(a)right.push(btn('⋯',albumMenu));
   }
-  app.append(header(title,sel?null:btn('‹ Albums',()=>{view={t:'home'};render();}),right));
+  app.append(header(title,(sel&&!trash)?null:btn('‹ Albums',()=>{view={t:'home'};sel=null;render();}),right));
+  if(trash&&ids.length){
+    const n=document.createElement('div');n.className='note';
+    n.textContent='Suppression définitive après '+TRASH_DAYS+' jours. Touche un élément pour le sélectionner.';
+    app.append(n);
+  }
   if(!ids.length){
     const e=document.createElement('div');e.className='empty';
-    e.textContent=a?'Album vide. Ajoute des photos avec le bouton ci-dessous, ou depuis « Toutes les photos » via Sélectionner → Albums.':'Aucune photo. Appuie sur « Importer ».';
+    e.textContent=trash?'La corbeille est vide.':a?'Album vide. Ajoute des photos avec le bouton ci-dessous, ou depuis « Toutes les photos » via Sélectionner → Albums.':'Aucune photo. Appuie sur « Importer ».';
     app.append(e);return;
   }
   const g=document.createElement('div');g.className='grid';
@@ -267,12 +295,21 @@ function renderGrid(app){
 function renderBar(){
   const b=$('#bar');b.innerHTML='';
   if(view.t==='home'){b.hidden=true;return;}
+  if(view.t==='trash'){
+    const n=sel?sel.size:0;
+    if(!n){b.hidden=true;return;}
+    b.hidden=false;
+    b.append(btn('Restaurer',()=>restoreTrash([...sel]),'p'));
+    b.append(btn('Supprimer définitivement',()=>purgeAsk([...sel]),'d'));
+    return;
+  }
   b.hidden=false;
   if(sel){
     const n=sel.size;
     b.append(btn('Albums',()=>n&&openSheet([...sel]),'p'));
     if(view.t==='album')b.append(btn('Retirer',()=>n&&removeFromAlbum([...sel]),''));
-    b.append(btn('Supprimer',()=>n&&deletePhotos([...sel]),'d'));
+    b.append(btn('Exporter',()=>n&&prepareExport([...sel]),''));
+    b.append(btn('Supprimer',()=>n&&trashPhotos([...sel]),'d'));
   }else b.append(btn('＋ Importer',()=>$('#picker').click(),'p'));
 }
 
@@ -397,16 +434,95 @@ $('#picker').onchange=async e=>{
   if(ok)m+=' Pense à supprimer les originaux de Photos.';
   toast(m,6000);
 };
-async function deletePhotos(pids,silent){
-  if(!silent&&!confirm('Supprimer définitivement '+pids.length+' photo'+(pids.length>1?'s':'')+' du coffre ?'))return false;
+
+/* ---------- Corbeille ---------- */
+async function trashPhotos(pids){
+  const now=Date.now();
+  for(const id of pids){
+    META.trash.push({id,at:now,albums:META.albums.filter(a=>a.ids.includes(id)).map(a=>a.id)});
+  }
+  for(const a of META.albums)a.ids=a.ids.filter(i=>!pids.includes(i));
+  IDS=IDS.filter(i=>!pids.includes(i));
+  sel=null;await saveMeta();render();
+  toast(cnt(pids.length)+' dans la corbeille (restaurable '+TRASH_DAYS+' jours)',3500);
+}
+async function restoreTrash(pids){
+  for(const id of pids){
+    const t=META.trash.find(x=>x.id===id);
+    if(t)for(const aid of t.albums||[]){const a=album(aid);if(a&&!a.ids.includes(id))a.ids.push(id);}
+  }
+  META.trash=META.trash.filter(t=>!pids.includes(t.id));
+  IDS=[...new Set([...IDS,...pids])].sort().reverse();
+  sel=new Set();await saveMeta();render();
+  toast(cnt(pids.length)+' restauré'+(pids.length>1?'s':''));
+}
+async function purge(pids,quiet){
   for(const id of pids){
     await del('photos',id);await del('thumbs',id);
     if(thumbURL.has(id)){URL.revokeObjectURL(thumbURL.get(id));thumbURL.delete(id);}
   }
+  META.trash=META.trash.filter(t=>!pids.includes(t.id));
+  META.vids=(META.vids||[]).filter(i=>!pids.includes(i));
   IDS=IDS.filter(i=>!pids.includes(i));
   for(const a of META.albums)a.ids=a.ids.filter(i=>!pids.includes(i));
-  META.vids=(META.vids||[]).filter(i=>!pids.includes(i));
-  sel=null;await saveMeta();render();return true;
+  await saveMeta();
+  if(!quiet){sel=new Set();render();}
+}
+async function purgeAsk(pids){
+  if(!confirm('Supprimer définitivement '+cnt(pids.length)+' ? Cette action est irréversible.'))return;
+  await purge(pids);
+}
+async function emptyTrash(){
+  const ids=trashIds();if(!ids.length)return;
+  if(!confirm('Vider la corbeille ('+cnt(ids.length)+') ? Cette action est irréversible.'))return;
+  await purge(ids);
+}
+
+/* ---------- Export vers Photos ---------- */
+// À appeler directement depuis un clic : iOS exige un geste de l’utilisateur pour ouvrir le menu de partage.
+function shareFiles(files){
+  if(navigator.canShare&&navigator.canShare({files})){
+    navigator.share({files}).catch(e=>{
+      if(e&&e.name==='AbortError')return;
+      toast('Partage impossible : téléchargement des fichiers…',3500);downloadFiles(files);
+    });
+  }else downloadFiles(files);
+}
+function downloadFiles(files){
+  files.forEach((f,i)=>setTimeout(()=>{
+    const a=document.createElement('a');a.href=URL.createObjectURL(f);a.download=f.name;
+    document.body.append(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),60000);
+  },i*400));
+}
+async function prepareExport(pids){
+  const files=[];let total=0,skipped=0;
+  try{
+    for(let i=0;i<pids.length;i++){
+      toast('Préparation '+(i+1)+' / '+pids.length+'…',0);
+      const rec=await get('photos',pids[i]);if(!rec)continue;
+      if(files.length&&total+rec.d.byteLength>EXPORT_MAX){skipped=pids.length-i;break;}
+      const buf=await decBuf(rec.d);
+      total+=buf.byteLength;
+      files.push(new File([buf],exportName(pids[i],rec.type),{type:rec.type}));
+    }
+  }catch(e){console.error(e);toast('Échec de la préparation');return;}
+  $('#toast')&&($('#toast').hidden=true);
+  if(!files.length)return;
+  openExportSheet(files,total,skipped);
+}
+function openExportSheet(files,total,skipped){
+  const bg=$('#sheetbg'),sh=$('#sheet');
+  sh.innerHTML='';
+  const h=document.createElement('h3');h.textContent='Exporter vers Photos';sh.append(h);
+  const p=document.createElement('p');
+  p.style.cssText='color:var(--mut);font-size:14px;line-height:1.45;margin:0 0 14px';
+  p.textContent=cnt(files.length)+' prêt'+(files.length>1?'s':'')+' ('+mb(total)+'). Appuie sur le bouton, puis choisis « Enregistrer l’image » ou « Enregistrer la vidéo » dans le menu iOS. Les originaux restent dans le Coffre.'+(skipped?' '+skipped+' autre'+(skipped>1?'s':'')+' non inclus (limite par lot) : relance l’export pour '+(skipped>1?'eux':'lui')+'.':'');
+  sh.append(p);
+  const go=btn('Enregistrer dans Photos',()=>shareFiles(files),'p');go.style.width='100%';sh.append(go);
+  const dl=btn('Télécharger les fichiers',()=>downloadFiles(files),'');dl.style.cssText='width:100%;margin-top:10px';sh.append(dl);
+  const ok=btn('Fermer',()=>{bg.hidden=true;sel=null;render();},'');ok.style.cssText='width:100%;margin-top:10px';sh.append(ok);
+  bg.hidden=false;
 }
 
 /* ---------- Viewer ---------- */
@@ -414,13 +530,14 @@ async function openViewer(ids,i){V={ids,i,url:null};$('#viewer').hidden=false;aw
 async function showV(){
   const id=V.ids[V.i];
   const vid=$('#vvid'),img=$('#vimg');
-  vid.pause();
+  vid.pause();V.file=null;
   const rec=await get('photos',id);
   if(!rec||!V||V.ids[V.i]!==id)return;
   const buf=await decBuf(rec.d);
   if(!V||V.ids[V.i]!==id)return;
   if(V.url)URL.revokeObjectURL(V.url);
-  V.url=URL.createObjectURL(new Blob([buf],{type:rec.type}));
+  V.file=new File([buf],exportName(id,rec.type),{type:rec.type});
+  V.url=URL.createObjectURL(V.file);
   const isV=(rec.type||'').startsWith('video/');
   vid.hidden=!isV;img.hidden=isV;
   if(isV){img.removeAttribute('src');vid.src=V.url;vid.loop=true;vid.load();vid.play().catch(()=>{});}
@@ -434,9 +551,13 @@ function closeViewer(){
 }
 $('#vclose').onclick=closeViewer;
 $('#valb').onclick=()=>V&&openSheet([V.ids[V.i]]);
+$('#vexp').onclick=()=>{
+  if(!V||!V.file)return toast('Chargement en cours…');
+  shareFiles([V.file]);
+};
 $('#vdel').onclick=async()=>{
   if(!V)return;const id=V.ids[V.i];
-  if(!await deletePhotos([id]))return;
+  await trashPhotos([id]);
   V.ids.splice(V.i,1);
   if(!V.ids.length)return closeViewer();
   if(V.i>=V.ids.length)V.i=V.ids.length-1;
@@ -465,7 +586,7 @@ async function exportBackup(){
   toast('Préparation de la sauvegarde…',0);
   try{
     const items=[];let body=new Blob([]);
-    for(const id of IDS){
+    for(const id of await keys('thumbs')){
       const p=await get('photos',id),t=await get('thumbs',id);
       if(!p||!t)continue;
       items.push({id,type:p.type,pl:p.d.byteLength,tl:t.d.byteLength});
