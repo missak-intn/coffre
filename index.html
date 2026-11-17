@@ -53,8 +53,11 @@ header h2{flex:1;margin:0;font-size:19px;white-space:nowrap;overflow:hidden;text
 #viewer{position:fixed;inset:0;z-index:20;background:#000;display:flex;flex-direction:column}
 #vtop,#vbot{display:flex;align-items:center;justify-content:space-between;padding:calc(env(safe-area-inset-top) + 6px) 12px 6px}
 #vbot{padding:6px 12px calc(env(safe-area-inset-bottom) + 10px)}
-#vwrap{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:pan-y}
-#vimg,#vvid{max-width:100%;max-height:100%;object-fit:contain}
+#vwrap{flex:1;position:relative;min-height:0;overflow:hidden;touch-action:none}
+#vzoom{position:absolute;inset:0;transform-origin:50% 50%}
+#vzoom.anim{transition:transform .22s ease-out}
+#vimg,#vvid{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;-webkit-touch-callout:none}
+#vmsg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:30px;color:var(--mut);line-height:1.5;pointer-events:none}
 .vb{position:absolute;left:6px;bottom:6px;background:rgba(0,0,0,.6);border-radius:6px;padding:1px 7px;font-size:12px}
 #sheetbg{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.55);display:flex;align-items:flex-end}
 #sheet{width:100%;max-height:75%;overflow:auto;background:var(--card);border-radius:18px 18px 0 0;padding:16px 16px calc(env(safe-area-inset-bottom) + 16px)}
@@ -89,7 +92,7 @@ header h2{flex:1;margin:0;font-size:19px;white-space:nowrap;overflow:hidden;text
 
 <div id="viewer" hidden>
   <div id="vtop"><button class="l" id="vclose">Fermer</button><span id="vcount" style="color:var(--mut)"></span><button class="l" id="valb">Albums</button></div>
-  <div id="vwrap"><img id="vimg" alt=""><video id="vvid" controls playsinline loop hidden></video></div>
+  <div id="vwrap"><div id="vzoom"><img id="vimg" alt=""><video id="vvid" controls playsinline loop hidden></video></div><div id="vmsg" hidden>Cette image ne peut pas s’afficher ici (format ou taille non pris en charge).<br>Utilise « Exporter » pour la récupérer.</div></div>
   <div id="vbot"><button class="d" id="vdel">Supprimer</button><button class="l" id="vexp">Exporter</button><span><button class="l" id="vprev" style="font-size:26px;padding:0 14px">‹</button><button class="l" id="vnext" style="font-size:26px;padding:0 14px">›</button></span></div>
 </div>
 <div id="sheetbg" hidden><div id="sheet"></div></div>
@@ -644,7 +647,7 @@ async function openViewer(ids,i){V={ids,i,url:null};$('#viewer').hidden=false;aw
 async function showV(){
   const id=V.ids[V.i];
   const vid=$('#vvid'),img=$('#vimg');
-  vid.pause();V.file=null;
+  vid.pause();V.file=null;$('#vmsg').hidden=true;resetZoom(false);
   const rec=await get('photos',id);
   if(!rec||!V||V.ids[V.i]!==id)return;
   const buf=await decBuf(rec.d);
@@ -659,10 +662,13 @@ async function showV(){
   $('#vcount').textContent=(V.i+1)+' / '+V.ids.length;
 }
 function closeViewer(){
+  resetZoom(false);
   const vv=$('#vvid');vv.pause();vv.removeAttribute('src');vv.load();
   $('#viewer').hidden=true;$('#vimg').removeAttribute('src');
   if(V&&V.url)URL.revokeObjectURL(V.url);V=null;
 }
+$('#vimg').onerror=()=>{if($('#vimg').getAttribute('src'))$('#vmsg').hidden=false;};
+$('#vvid').onerror=()=>{if($('#vvid').getAttribute('src'))$('#vmsg').hidden=false;};
 $('#vclose').onclick=closeViewer;
 $('#valb').onclick=()=>V&&openSheet([V.ids[V.i]]);
 $('#vexp').onclick=()=>{
@@ -677,17 +683,98 @@ $('#vdel').onclick=async()=>{
   if(V.i>=V.ids.length)V.i=V.ids.length-1;
   showV();
 };
-let tx0=null;
 $('#vprev').onclick=()=>{if(V&&V.i>0){V.i--;showV();}};
 $('#vnext').onclick=()=>{if(V&&V.i<V.ids.length-1){V.i++;showV();}};
-$('#vwrap').addEventListener('touchstart',e=>{tx0=e.target.id==='vvid'?null:e.touches[0].clientX;},{passive:true});
-$('#vwrap').addEventListener('touchend',e=>{
-  if(tx0===null||!V)return;
-  const dx=e.changedTouches[0].clientX-tx0;tx0=null;
-  if(Math.abs(dx)<50)return;
-  if(dx<0&&V.i<V.ids.length-1){V.i++;showV();}
-  else if(dx>0&&V.i>0){V.i--;showV();}
-});
+
+/* ---------- Zoom : pincer, glisser, double-tap (photos et vidéos) ---------- */
+const Z={s:1,x:0,y:0}, ZMAX=6, zoomEl=$('#vzoom'), wrapEl=$('#vwrap');
+let G=null, lastTap={t:0,x:0,y:0}, tapTimer=null;
+const curMedia=()=>$('#vvid').hidden?$('#vimg'):$('#vvid');
+function fitSize(){
+  const m=curMedia(),W=wrapEl.clientWidth,H=wrapEl.clientHeight;
+  const nw=m.id==='vvid'?m.videoWidth:m.naturalWidth, nh=m.id==='vvid'?m.videoHeight:m.naturalHeight;
+  if(!nw||!nh)return {W,H,cw:W,ch:H};
+  const f=Math.min(W/nw,H/nh);
+  return {W,H,cw:nw*f,ch:nh*f};
+}
+function clampZ(){
+  const {W,H,cw,ch}=fitSize();
+  const bx=Math.max(0,(cw*Z.s-W)/2), by=Math.max(0,(ch*Z.s-H)/2);
+  Z.x=Math.max(-bx,Math.min(bx,Z.x));Z.y=Math.max(-by,Math.min(by,Z.y));
+}
+function applyZ(anim){
+  zoomEl.classList.toggle('anim',!!anim);
+  zoomEl.style.transform=(Z.s===1&&!Z.x&&!Z.y)?'':'translate('+Z.x+'px,'+Z.y+'px) scale('+Z.s+')';
+  const vid=$('#vvid');
+  if(!vid.hidden)vid.controls=Z.s<=1.01;   // contrôles natifs masqués pendant le zoom
+}
+function resetZoom(anim){Z.s=1;Z.x=0;Z.y=0;applyZ(anim);}
+const tdist=(a,b)=>Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+function local(x,y){const r=wrapEl.getBoundingClientRect();return {x:x-r.left,y:y-r.top};}
+wrapEl.addEventListener('gesturestart',e=>e.preventDefault());
+wrapEl.addEventListener('touchstart',e=>{
+  if(!V)return;
+  zoomEl.classList.remove('anim');
+  const ts=e.touches;
+  if(ts.length>=2){
+    clearTimeout(tapTimer);
+    G={mode:'pinch',d0:tdist(ts[0],ts[1])||1,s0:Z.s,x0:Z.x,y0:Z.y,
+       f0:local((ts[0].clientX+ts[1].clientX)/2,(ts[0].clientY+ts[1].clientY)/2)};
+  }else{
+    G={mode:'one',sx:ts[0].clientX,sy:ts[0].clientY,x0:Z.x,y0:Z.y,moved:false,onVideo:e.target.id==='vvid'};
+  }
+},{passive:false});
+wrapEl.addEventListener('touchmove',e=>{
+  if(!V||!G)return;
+  const ts=e.touches,W=wrapEl.clientWidth,H=wrapEl.clientHeight;
+  if(G.mode==='pinch'&&ts.length>=2){
+    e.preventDefault();
+    const f=local((ts[0].clientX+ts[1].clientX)/2,(ts[0].clientY+ts[1].clientY)/2);
+    const s=Math.max(1,Math.min(ZMAX,G.s0*tdist(ts[0],ts[1])/G.d0));
+    const px=(G.f0.x-W/2-G.x0)/G.s0, py=(G.f0.y-H/2-G.y0)/G.s0;   // point de l’image sous les doigts au départ
+    Z.s=s;Z.x=f.x-W/2-s*px;Z.y=f.y-H/2-s*py;
+    clampZ();applyZ(false);
+  }else if(G.mode==='one'&&ts.length===1){
+    const dx=ts[0].clientX-G.sx,dy=ts[0].clientY-G.sy;
+    if(Math.abs(dx)>8||Math.abs(dy)>8)G.moved=true;
+    if(Z.s>1.01){e.preventDefault();Z.x=G.x0+dx;Z.y=G.y0+dy;clampZ();applyZ(false);}
+  }
+},{passive:false});
+wrapEl.addEventListener('touchend',e=>{
+  if(!V||!G)return;
+  const g=G;
+  if(g.mode==='pinch'){
+    if(e.touches.length===0){G=null;if(Z.s<1.05)resetZoom(true);}
+    else G={mode:'one',sx:e.touches[0].clientX,sy:e.touches[0].clientY,x0:Z.x,y0:Z.y,moved:true,onVideo:false,pinched:true};
+    return;
+  }
+  G=null;
+  if(g.pinched)return;
+  const t=e.changedTouches[0],dx=t.clientX-g.sx,dy=t.clientY-g.sy;
+  if(g.moved){
+    // balayage horizontal : photo suivante / précédente (uniquement sans zoom, et pas sur une vidéo)
+    if(Z.s<=1.01&&!g.onVideo&&Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)){
+      if(dx<0&&V.i<V.ids.length-1){V.i++;showV();}
+      else if(dx>0&&V.i>0){V.i--;showV();}
+    }
+    return;
+  }
+  // simple appui
+  const f=local(t.clientX,t.clientY),W=wrapEl.clientWidth,H=wrapEl.clientHeight;
+  const vid=$('#vvid');
+  if(!vid.hidden&&Z.s<=1.01&&f.y>H-90)return;   // zone des contrôles de la vidéo : on ne touche à rien
+  const now=Date.now();
+  if(now-lastTap.t<300&&Math.hypot(t.clientX-lastTap.x,t.clientY-lastTap.y)<40){
+    clearTimeout(tapTimer);lastTap.t=0;e.preventDefault();
+    if(Z.s>1.01)resetZoom(true);
+    else{const s=2.5;Z.s=s;Z.x=-(f.x-W/2)*(s-1);Z.y=-(f.y-H/2)*(s-1);clampZ();applyZ(true);}
+  }else{
+    lastTap={t:now,x:t.clientX,y:t.clientY};
+    // vidéo zoomée : les contrôles sont masqués, un appui lance / met en pause
+    if(!vid.hidden&&Z.s>1.01)tapTimer=setTimeout(()=>{vid.paused?vid.play().catch(()=>{}):vid.pause();},300);
+  }
+},{passive:false});
+wrapEl.addEventListener('touchcancel',()=>{G=null;});
 
 /* ---------- Backup ---------- */
 const b64=buf=>new Promise(r=>{const f=new FileReader();f.onload=()=>r(f.result.split(',')[1]);f.readAsDataURL(new Blob([buf]));});
