@@ -50,10 +50,18 @@ header h2{flex:1;margin:0;font-size:19px;white-space:nowrap;overflow:hidden;text
 #bar{position:fixed;left:0;right:0;bottom:0;z-index:6;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);background:linear-gradient(transparent,var(--bg) 40%)}
 #bar button{padding:9px 12px;font-size:15px;box-shadow:0 2px 10px rgba(0,0,0,.4)}
 .note{color:var(--mut);font-size:13px;text-align:center;padding:6px 16px 10px}
-#viewer{position:fixed;inset:0;z-index:20;background:#000;display:flex;flex-direction:column}
-#vtop,#vbot{display:flex;align-items:center;justify-content:space-between;padding:calc(env(safe-area-inset-top) + 6px) 12px 6px}
-#vbot{padding:6px 12px calc(env(safe-area-inset-bottom) + 10px)}
-#vwrap{flex:1;position:relative;min-height:0;overflow:hidden;touch-action:none}
+#viewer{position:fixed;inset:0;z-index:20;background:#000;overflow:hidden}
+#vtop,#vbot{position:absolute;left:0;right:0;z-index:2;color:#fff;transition:opacity .2s}
+#vtop{top:0;display:flex;align-items:center;justify-content:space-between;padding:calc(env(safe-area-inset-top) + 6px) 12px 22px;background:linear-gradient(rgba(0,0,0,.65),rgba(0,0,0,0))}
+#vbot{bottom:0;padding:26px 12px calc(env(safe-area-inset-bottom) + 10px);background:linear-gradient(rgba(0,0,0,0),rgba(0,0,0,.7))}
+#vtop button,#vbot button,#vtop span,#vbot span{text-shadow:0 1px 3px rgba(0,0,0,.8)}
+#vrow{display:flex;align-items:center;justify-content:space-between}
+#vctrl{display:flex;align-items:center;gap:10px;padding:0 4px 8px;font-size:13px;font-variant-numeric:tabular-nums}
+#vctrl[hidden]{display:none}
+#vplay{background:none;color:#fff;font-size:22px;padding:4px 8px;min-width:40px}
+#vseek{flex:1;min-width:0;accent-color:#fff;touch-action:pan-x}
+#viewer.hide #vtop,#viewer.hide #vbot{opacity:0;pointer-events:none}
+#vwrap{position:absolute;inset:0;overflow:hidden;touch-action:none}
 #vzoom{position:absolute;inset:0;transform-origin:50% 50%}
 #vzoom.anim{transition:transform .22s ease-out}
 #vimg,#vvid{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;-webkit-touch-callout:none}
@@ -91,9 +99,12 @@ header h2{flex:1;margin:0;font-size:19px;white-space:nowrap;overflow:hidden;text
 <input type="file" id="picker" accept="image/*,video/*" multiple hidden>
 
 <div id="viewer" hidden>
-  <div id="vtop"><button class="l" id="vclose">Fermer</button><span id="vcount" style="color:var(--mut)"></span><button class="l" id="valb">Albums</button></div>
-  <div id="vwrap"><div id="vzoom"><img id="vimg" alt=""><video id="vvid" controls playsinline loop hidden></video></div><div id="vmsg" hidden>Cette image ne peut pas s’afficher ici (format ou taille non pris en charge).<br>Utilise « Exporter » pour la récupérer.</div></div>
-  <div id="vbot"><button class="d" id="vdel">Supprimer</button><button class="l" id="vexp">Exporter</button><span><button class="l" id="vprev" style="font-size:26px;padding:0 14px">‹</button><button class="l" id="vnext" style="font-size:26px;padding:0 14px">›</button></span></div>
+  <div id="vwrap"><div id="vzoom"><img id="vimg" alt=""><video id="vvid" playsinline loop hidden></video></div><div id="vmsg" hidden>Cette image ne peut pas s’afficher ici (format ou taille non pris en charge).<br>Utilise « Exporter » pour la récupérer.</div></div>
+  <div id="vtop"><button class="l" id="vclose">Fermer</button><span id="vcount"></span><button class="l" id="valb">Albums</button></div>
+  <div id="vbot">
+    <div id="vctrl" hidden><button id="vplay" aria-label="Lecture / pause">⏸</button><span id="vcur">0:00</span><input type="range" id="vseek" min="0" max="1000" value="0"><span id="vdur">0:00</span></div>
+    <div id="vrow"><button class="d" id="vdel">Supprimer</button><button class="l" id="vexp">Exporter</button><span><button class="l" id="vprev" style="font-size:26px;padding:0 14px">‹</button><button class="l" id="vnext" style="font-size:26px;padding:0 14px">›</button></span></div>
+  </div></div>
 </div>
 <div id="sheetbg" hidden><div id="sheet"></div></div>
 
@@ -643,7 +654,25 @@ function openExportSheet(files,total,skipped){
 }
 
 /* ---------- Viewer ---------- */
-async function openViewer(ids,i){V={ids,i,url:null};$('#viewer').hidden=false;await showV();}
+let chromeHidden=false,hideT=null,seekDrag=false;
+const fmt=t=>{t=Math.max(0,Math.floor(t||0));return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');};
+function setChrome(show){chromeHidden=!show;$('#viewer').classList.toggle('hide',!show);clearTimeout(hideT);if(show)armHide();}
+function armHide(){   // pendant la lecture d’une vidéo, les barres se masquent seules après 3 s
+  clearTimeout(hideT);const v=$('#vvid');
+  if(!chromeHidden&&!v.hidden&&!v.paused&&!seekDrag)hideT=setTimeout(()=>{if(V&&!$('#vvid').paused)setChrome(false);},3000);
+}
+(()=>{
+  const v=$('#vvid'),sk=$('#vseek');
+  const upd=()=>{if(!seekDrag&&v.duration)sk.value=Math.round(v.currentTime/v.duration*1000);$('#vcur').textContent=fmt(v.currentTime);};
+  v.addEventListener('loadedmetadata',()=>{$('#vdur').textContent=fmt(v.duration);upd();});
+  v.addEventListener('timeupdate',upd);
+  v.addEventListener('play',()=>{$('#vplay').textContent='⏸';armHide();});
+  v.addEventListener('pause',()=>{$('#vplay').textContent='▶';clearTimeout(hideT);});
+  $('#vplay').onclick=()=>{v.paused?v.play().catch(()=>{}):v.pause();armHide();};
+  sk.addEventListener('input',()=>{seekDrag=true;clearTimeout(hideT);if(v.duration){v.currentTime=sk.value/1000*v.duration;$('#vcur').textContent=fmt(v.currentTime);}});
+  sk.addEventListener('change',()=>{seekDrag=false;armHide();});
+})();
+async function openViewer(ids,i){V={ids,i,url:null};$('#viewer').hidden=false;setChrome(true);await showV();}
 async function showV(){
   const id=V.ids[V.i];
   const vid=$('#vvid'),img=$('#vimg');
@@ -656,13 +685,13 @@ async function showV(){
   V.file=new File([buf],exportName(id,rec.type),{type:rec.type});
   V.url=URL.createObjectURL(V.file);
   const isV=(rec.type||'').startsWith('video/');
-  vid.hidden=!isV;img.hidden=isV;
+  vid.hidden=!isV;img.hidden=isV;$('#vctrl').hidden=!isV;if(isV){$('#vseek').value=0;$('#vcur').textContent='0:00';$('#vdur').textContent='0:00';}
   if(isV){img.removeAttribute('src');vid.src=V.url;vid.loop=true;vid.load();vid.play().catch(()=>{});}
   else{vid.removeAttribute('src');vid.load();img.src=V.url;}
   $('#vcount').textContent=(V.i+1)+' / '+V.ids.length;
 }
 function closeViewer(){
-  resetZoom(false);
+  clearTimeout(hideT);resetZoom(false);
   const vv=$('#vvid');vv.pause();vv.removeAttribute('src');vv.load();
   $('#viewer').hidden=true;$('#vimg').removeAttribute('src');
   if(V&&V.url)URL.revokeObjectURL(V.url);V=null;
@@ -705,8 +734,6 @@ function clampZ(){
 function applyZ(anim){
   zoomEl.classList.toggle('anim',!!anim);
   zoomEl.style.transform=(Z.s===1&&!Z.x&&!Z.y)?'':'translate('+Z.x+'px,'+Z.y+'px) scale('+Z.s+')';
-  const vid=$('#vvid');
-  if(!vid.hidden)vid.controls=Z.s<=1.01;   // contrôles natifs masqués pendant le zoom
 }
 function resetZoom(anim){Z.s=1;Z.x=0;Z.y=0;applyZ(anim);}
 const tdist=(a,b)=>Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
@@ -752,8 +779,8 @@ wrapEl.addEventListener('touchend',e=>{
   if(g.pinched)return;
   const t=e.changedTouches[0],dx=t.clientX-g.sx,dy=t.clientY-g.sy;
   if(g.moved){
-    // balayage horizontal : photo suivante / précédente (uniquement sans zoom, et pas sur une vidéo)
-    if(Z.s<=1.01&&!g.onVideo&&Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)){
+    // balayage horizontal : photo suivante / précédente (uniquement sans zoom)
+    if(Z.s<=1.01&&Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)){
       if(dx<0&&V.i<V.ids.length-1){V.i++;showV();}
       else if(dx>0&&V.i>0){V.i--;showV();}
     }
@@ -761,8 +788,6 @@ wrapEl.addEventListener('touchend',e=>{
   }
   // simple appui
   const f=local(t.clientX,t.clientY),W=wrapEl.clientWidth,H=wrapEl.clientHeight;
-  const vid=$('#vvid');
-  if(!vid.hidden&&Z.s<=1.01&&f.y>H-90)return;   // zone des contrôles de la vidéo : on ne touche à rien
   const now=Date.now();
   if(now-lastTap.t<300&&Math.hypot(t.clientX-lastTap.x,t.clientY-lastTap.y)<40){
     clearTimeout(tapTimer);lastTap.t=0;e.preventDefault();
@@ -770,8 +795,8 @@ wrapEl.addEventListener('touchend',e=>{
     else{const s=2.5;Z.s=s;Z.x=-(f.x-W/2)*(s-1);Z.y=-(f.y-H/2)*(s-1);clampZ();applyZ(true);}
   }else{
     lastTap={t:now,x:t.clientX,y:t.clientY};
-    // vidéo zoomée : les contrôles sont masqués, un appui lance / met en pause
-    if(!vid.hidden&&Z.s>1.01)tapTimer=setTimeout(()=>{vid.paused?vid.play().catch(()=>{}):vid.pause();},300);
+    // simple appui : affiche / masque les barres (court délai pour laisser passer un double-appui)
+    tapTimer=setTimeout(()=>setChrome(chromeHidden),280);
   }
 },{passive:false});
 wrapEl.addEventListener('touchcancel',()=>{G=null;});
